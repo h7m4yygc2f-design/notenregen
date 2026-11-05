@@ -237,6 +237,13 @@ button,.btn,input{touch-action:manipulation;-webkit-tap-highlight-color:transpar
       <button data-strict="strict" aria-pressed="false" title="Elke noot van een akkoord moet gehoord worden">Streng</button>
     </div>
   </div>
+  <div class="group">
+    <span class="label">Pedaal</span>
+    <div class="seg" id="pedalSeg">
+      <button data-pedal="auto" aria-pressed="true" title="Pedaal uit het bestand, of automatisch als het bestand er geen heeft">aan</button>
+      <button data-pedal="off" aria-pressed="false">uit</button>
+    </div>
+  </div>
 </div>
 </div>
 
@@ -659,13 +666,46 @@ function parseMidi(buf, name){
   return finalize(generic ? pretty : title, all, bars, tm.firstBpm, null, pedals);
 }
 
-function finalize(title, notes, bars, bpm, barNums, pedals){
-  pedals = (pedals || []).filter(p => p[1] - p[0] > 0.02).sort((a, b) => a[0] - b[0]);
-  // with the pedal down, a released key keeps sounding until the pedal comes up
+// with the pedal down, a released key keeps sounding until the pedal comes up
+function setSoundEnds(notes, pedals){
   for(const n of notes){
     const e = n.start + n.dur; n.soundEnd = e;
     for(const [ps, pe] of pedals){ if(ps > e) break; if(e > ps + 0.02 && e < pe){ n.soundEnd = pe; break; } }
   }
+}
+// No pedal in the file? Pedal the way pianists usually do: change at every new bass note
+// of the left hand and at each bar line (the pedal goes down just after the note, "legato pedalling").
+function autoPedals(song){
+  const L = song.notes.filter(n => n.hand === 'L');
+  if(L.length < 4) return [];
+  const pitches = L.map(n => n.midi).sort((a, b) => a - b), med = pitches[pitches.length >> 1];
+  const groups = [];
+  for(const n of L){ const g = groups[groups.length - 1]; if(g && n.start - g.t < 0.04) g.low = Math.min(g.low, n.midi); else groups.push({t:n.start, low:n.midi}); }
+  const bars = song.bars || [], changes = [];
+  let prev = null, lastT = -9, bi = 0;
+  for(const g of groups){
+    if(g.low >= med && groups.length > 8 && pitches[0] < med) continue;   // chord tones above the bass keep the harmony
+    while(bi < bars.length - 1 && bars[bi + 1] <= g.t + 0.02) bi++;
+    const atBar = bars.length && Math.abs(bars[bi] - g.t) < 0.05;
+    if((g.low !== prev || atBar) && g.t - lastT >= 0.45){ changes.push(g.t); lastT = g.t; prev = g.low; }
+  }
+  const spans = [];
+  for(let i = 0; i < changes.length; i++){
+    const a = changes[i] + 0.06, b = i + 1 < changes.length ? changes[i + 1] : song.end;
+    if(b - a > 0.1) spans.push([a, b]);
+  }
+  return spans;
+}
+function applyPedalMode(song){
+  if(!song.filePedals) song.filePedals = song.pedals || [];
+  song.autoPedal = false;
+  let ped = [];
+  if(S.pedalMode !== 'off'){ ped = song.filePedals; if(!ped.length){ ped = autoPedals(song); song.autoPedal = ped.length > 0; } }
+  song.pedals = ped; setSoundEnds(song.notes, ped);
+}
+function finalize(title, notes, bars, bpm, barNums, pedals){
+  pedals = (pedals || []).filter(p => p[1] - p[0] > 0.02).sort((a, b) => a[0] - b[0]);
+  setSoundEnds(notes, pedals);
   notes.sort((a,b) => a.start - b.start || a.midi - b.midi);
   const end = Math.max(...notes.map(n => n.start + n.dur));
   const mids = notes.map(n => n.midi).sort((a,b)=>a-b);
@@ -767,7 +807,7 @@ const S = {
   song:null, t:-1.5, playing:false, speed:store.get('speed', 0.7), mode:store.get('mode','wait'),
   volume:store.get('volume', 0.8), hands:store.get('hands',{L:true,R:true}), names:store.get('names','solfege'), kbBase:48,
   loopA:null, loopB:null, hits:0, errors:0, waiting:false,
-  fingers:store.get('fingers', true), trainer:store.get('trainer', false), fullRun:true, roundErrBase:0
+  fingers:store.get('fingers', true), pedalMode:store.get('pedalMode', 'auto'), trainer:store.get('trainer', false), fullRun:true, roundErrBase:0
 };
 let groups = [], gi = 0, ni = 0;
 const held = new Map();     // midi -> {voice, state}
@@ -807,6 +847,7 @@ function loadSong(song, opts = {}){
   song.id = song.id || songId(song);
   if(opts.save && !mySongs.add(song)) setTimeout(() => showToast('Niet bewaard', 'Het geheugen van de browser is vol. Verwijder een paar liedjes uit Mijn liedjes.', 4000), 3600);
   store.set('lastId', song.id);
+  applyPedalMode(song);
   S.song = song; S.loopA = S.loopB = null; updateLoopBtn();
   S.kbBase = Math.min(84, Math.max(24, (Math.floor(song.median / 12) - 1) * 12));
   setPlaying(false);
@@ -824,13 +865,13 @@ function updateSongInfo(){
   $('songname').innerHTML = '';
   const b = document.createElement('b'); b.textContent = song.title;
   const p = progress.get(song.id);
-  $('songname').append(b, ` · ${song.notes.length} noten · ${song.bpm} bpm` + (p && p.plays ? ` · ${starStr(p.stars || 0)} · beste ${p.best}%` : ''));
+  $('songname').append(b, ` · ${song.notes.length} noten · ${song.bpm} bpm` + (song.autoPedal ? ' · auto-pedaal' : '') + (p && p.plays ? ` · ${starStr(p.stars || 0)} · beste ${p.best}%` : ''));
 }
 
 /* ---------------- My songs & progress (this browser only) ---------------- */
 const r3 = x => Math.round(x * 1000) / 1000;
 function songId(song){ let h = 0; for(const n of song.notes.slice(0, 400)) h = (h * 31 + n.midi * 7 + Math.round(n.start * 100)) | 0; return 's:' + song.title + '|' + song.notes.length + '|' + (h >>> 0).toString(36); }
-function packSong(s){ return {title:s.title, bpm:s.bpm, bars:s.bars.map(r3), barNums:s.barNums, pd:(s.pedals || []).map(p => [r3(p[0]), r3(p[1])]), n:s.notes.map(n => [n.midi, r3(n.start), r3(n.dur), n.hand === 'L' ? 1 : 0, n.finger || 0])}; }
+function packSong(s){ return {title:s.title, bpm:s.bpm, bars:s.bars.map(r3), barNums:s.barNums, pd:(s.filePedals || s.pedals || []).map(p => [r3(p[0]), r3(p[1])]), n:s.notes.map(n => [n.midi, r3(n.start), r3(n.dur), n.hand === 'L' ? 1 : 0, n.finger || 0])}; }
 function unpackSong(p){ return finalize(p.title, p.n.map(a => ({midi:a[0], start:a[1], dur:a[2], hand:a[3] ? 'L' : 'R', finger:a[4] || 0})), p.bars, p.bpm, p.barNums, p.pd); }
 // Kept in this browser first, and mirrored to the viewer's private online store (cloud, below) when available.
 // Removed songs/scores stay as small "deleted" markers, so another device does not bring them back.
@@ -1438,6 +1479,7 @@ bindSeg('handSeg', 'hand', v => S.hands[v], v => {
   $('handSeg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(S.hands[b.dataset.hand])));
 });
 bindSeg('nameSeg', 'names', v => S.names === v, v => { S.names = v; store.set('names', v); });
+bindSeg('pedalSeg', 'pedal', v => S.pedalMode === v, v => { S.pedalMode = v; store.set('pedalMode', v); if(S.song){ applyPedalMode(S.song); updateSongInfo(); } kick(); });
 bindSeg('fingerSeg', 'fingers', v => (S.fingers ? 'on' : 'off') === v, v => { S.fingers = v === 'on'; store.set('fingers', S.fingers); });
 const paintTrain = () => $('trainBtn').setAttribute('aria-pressed', String(S.trainer));
 paintTrain();
