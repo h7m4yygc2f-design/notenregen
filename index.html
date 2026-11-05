@@ -1079,15 +1079,37 @@ function draw(now){
           ctx.fillStyle = black ? '#ffffff' : '#141822'; ctx.fillText(String(nn.finger), x + w/2, y + (black ? h * 0.45 : h * 0.55));
         }
       }
+      const nm = S.names === 'off' ? '' : NAMES[S.names][m % 12];
+      const kl = kbLabel(m);
       if(!black){
-        const lbl = m % 12 === 0 ? (S.names === 'solfege' ? 'do' : 'C') + (Math.floor(m/12) - 1) : '';
-        const kl = kbLabel(m);
-        ctx.font = `500 ${Math.min(11, k.w * 0.4)}px ${C('f-body')}`;
-        if(lbl){ ctx.fillStyle = fc ? 'rgba(0,0,0,0.6)' : 'rgba(30,34,45,0.55)'; ctx.fillText(lbl, x + w/2, y + h - 8); }
-        if(kl && k.w > 14){ ctx.font = `600 ${Math.min(10, k.w*0.36)}px ${C('f-mono')}`; ctx.fillStyle = 'rgba(30,34,45,0.35)'; ctx.fillText(kl, x + w/2, y + h - (lbl ? 22 : 8)); }
+        // note name on every white key, big and bold; the do's also carry their octave number
+        const blackZone = kbH * 0.62;
+        if(nm){
+          const fs = Math.max(9, Math.min(17, k.w * 0.5));
+          ctx.font = `700 ${fs}px ${C('f-body')}`;
+          if(ctx.measureText(nm).width <= w - 2){
+            ctx.fillStyle = fc ? 'rgba(10,12,18,0.9)' : (m % 12 === 0 ? 'rgba(20,24,34,0.95)' : 'rgba(20,24,34,0.78)');
+            ctx.fillText(nm, x + w/2, y + h - 8);
+            if(m % 12 === 0 && h - blackZone > fs + 22){
+              ctx.font = `600 ${Math.max(8, fs * 0.62)}px ${C('f-mono')}`;
+              ctx.fillStyle = fc ? 'rgba(10,12,18,0.6)' : 'rgba(20,24,34,0.45)';
+              ctx.fillText(String(Math.floor(m / 12) - 1), x + w/2, y + h - 10 - fs);
+            }
+          }
+        } else if(m % 12 === 0){
+          ctx.font = `500 ${Math.min(11, k.w * 0.4)}px ${C('f-body')}`;
+          ctx.fillStyle = 'rgba(30,34,45,0.55)'; ctx.fillText('C' + (Math.floor(m / 12) - 1), x + w/2, y + h - 8);
+        }
+        if(kl && k.w > 14){ ctx.font = `600 ${Math.min(9, k.w * 0.32)}px ${C('f-mono')}`; ctx.fillStyle = 'rgba(30,34,45,0.3)'; ctx.fillText(kl, x + w/2, y + blackZone + 12); }
       } else {
-        const kl = kbLabel(m);
-        if(kl && k.w > 10){ ctx.font = `600 ${Math.min(9, k.w*0.45)}px ${C('f-mono')}`; ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillText(kl, x + w/2, y + h - 12); }
+        if(nm){
+          // one size for all black keys, chosen so the widest name (sol#) fits
+          ctx.font = `700 10px ${C('f-body')}`;
+          const fs = Math.min(11, 10 * (w - 2) / ctx.measureText(NAMES[S.names][7] + '#').width);
+          ctx.font = `700 ${fs}px ${C('f-body')}`;
+          if(fs >= 7){ ctx.fillStyle = fc ? 'rgba(10,12,18,0.9)' : 'rgba(255,255,255,0.82)'; ctx.fillText(nm, x + w/2, y + h - 14); }
+        }
+        if(kl && k.w > 10){ ctx.font = `600 ${Math.min(8, k.w * 0.4)}px ${C('f-mono')}`; ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillText(kl, x + w/2, y + 14); }
       }
     }
   }
