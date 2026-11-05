@@ -455,7 +455,7 @@ function parseMusicXML(text, fallbackTitle){
   const parts = [...doc.getElementsByTagName('part')].map(part => {
     let divisions = 1, staves = 1;
     const measures = kids(part, 'measure').map(meas => {
-      const M = {num:meas.getAttribute('number') || '', notes:[], tempos:[], len:0, fwd:false, back:0, endStart:null, endStop:false};
+      const M = {num:meas.getAttribute('number') || '', notes:[], tempos:[], pedals:[], len:0, fwd:false, back:0, endStart:null, endStop:false};
       let pos = 0, maxPos = 0, lastStart = 0;
       for(const el of meas.children){
         const n = el.nodeName;
@@ -464,6 +464,9 @@ function parseMusicXML(text, fallbackTitle){
           const st = kid(el,'staves'); if(st) staves = Math.max(staves, +st.textContent || 1);
         } else if(n === 'direction' || n === 'sound'){
           const s = n === 'sound' ? el : kid(el,'sound');
+          const ped = n === 'direction' ? el.querySelector('direction-type > pedal') : null;
+          if(ped) M.pedals.push({pos, type:ped.getAttribute('type') || 'start'});
+          else if(s && s.getAttribute('damper-pedal')) M.pedals.push({pos, type:s.getAttribute('damper-pedal') === 'no' ? 'stop' : 'start'});
           if(s && s.getAttribute('tempo')) M.tempos.push({pos, bpm:+s.getAttribute('tempo')});
           else {
             const met = el.querySelector('metronome');
@@ -532,13 +535,14 @@ function parseMusicXML(text, fallbackTitle){
 
   // 3. lay the measures out in that order
   const lenOf = k => Math.max(0, ...parts.map(p => p.measures[k]?.len || 0));
-  const tempos = [], bars = [], barNums = [];
+  const tempos = [], bars = [], barNums = [], pedEv = [];
   let t0 = 0;
   for(const k of order){
     bars.push(t0); barNums.push(info(k).num || String(k + 1));
     parts.forEach(p => {
       const M = p.measures[k]; if(!M) return;
       M.tempos.forEach(tp => tempos.push({beat:t0 + tp.pos, bpm:tp.bpm, weak:tp.weak}));
+      M.pedals.forEach(pd => pedEv.push({beat:t0 + pd.pos, type:pd.type}));
       for(const n of M.notes){
         const abs = t0 + n.start, key = n.midi + '_' + n.staff;
         if(n.tieStop && p.ties.has(key)){
@@ -568,7 +572,14 @@ function parseMusicXML(text, fallbackTitle){
     all.push({midi:n.midi, hand, finger:n.finger, start:tm(n.startBeat), dur:Math.max(0.05, tm(n.endBeat) - tm(n.startBeat))});
   }));
   if(!all.length) throw new Error('In deze partituur staan geen noten met een toonhoogte.');
-  return finalize(title, all, bars.map(tm), tm.firstBpm, barNums);
+  const pedals = []; let pOpen = null;
+  for(const e of pedEv.sort((x, y) => x.beat - y.beat)){
+    if(e.type === 'start' || e.type === 'resume'){ if(pOpen == null) pOpen = e.beat; }
+    else if(e.type === 'stop' || e.type === 'discontinue'){ if(pOpen != null){ pedals.push([tm(pOpen), tm(e.beat)]); pOpen = null; } }
+    else if(e.type === 'change'){ if(pOpen != null) pedals.push([tm(pOpen), tm(e.beat)]); pOpen = e.beat; }
+  }
+  if(pOpen != null) pedals.push([tm(pOpen), tm(t0)]);
+  return finalize(title, all, bars.map(tm), tm.firstBpm, barNums, pedals);
 }
 
 async function parseMXL(buf, name){
@@ -593,7 +604,7 @@ function parseMidi(buf, name){
   const ntr = d.getUint16(p+2), div = d.getUint16(p+4);
   if(div & 0x8000) throw new Error('Dit MIDI-bestand gebruikt SMPTE-tijd, dat wordt niet ondersteund.');
   p += hlen;
-  const tempos = [], sigs = [], tracks = [];
+  const tempos = [], sigs = [], tracks = [], pedEv = [];
   let title = null;
   for(let t = 0; t < ntr && p < d.byteLength - 8; t++){
     const id = str(4), len = d.getUint32(p); p += 4;
@@ -613,6 +624,7 @@ function parseMidi(buf, name){
       const hi = status & 0xF0, ch = status & 0x0F;
       if(hi === 0xC0 || hi === 0xD0){ p++; continue; }
       const a = u8(), v = u8();
+      if(hi === 0xB0 && a === 64 && ch !== 9){ pedEv.push({tick, down:v >= 64}); continue; }
       if(hi === 0x90 && v > 0){ (open[ch*128+a] ||= []).push(tick); }
       else if(hi === 0x80 || hi === 0x90){
         const st = open[ch*128+a]?.shift();
@@ -638,14 +650,26 @@ function parseMidi(buf, name){
   for(let b = 0; b <= lastBeat + 0.001; b += barBeats) bars.push(tm(b));
   const generic = !title || /^(piano|grand piano|acoustic grand( piano)?|track ?\d*|untitled|sequence|melody|right|left)$/i.test(title);
   const pretty = String(name || 'MIDI-liedje').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
-  return finalize(generic ? pretty : title, all, bars, tm.firstBpm);
+  const pedals = []; let pOpen = null;
+  for(const e of pedEv.sort((x, y) => x.tick - y.tick)){
+    if(e.down && pOpen == null) pOpen = e.tick;
+    else if(!e.down && pOpen != null){ pedals.push([tm(pOpen / div), tm(e.tick / div)]); pOpen = null; }
+  }
+  if(pOpen != null) pedals.push([tm(pOpen / div), tm(lastBeat)]);
+  return finalize(generic ? pretty : title, all, bars, tm.firstBpm, null, pedals);
 }
 
-function finalize(title, notes, bars, bpm, barNums){
+function finalize(title, notes, bars, bpm, barNums, pedals){
+  pedals = (pedals || []).filter(p => p[1] - p[0] > 0.02).sort((a, b) => a[0] - b[0]);
+  // with the pedal down, a released key keeps sounding until the pedal comes up
+  for(const n of notes){
+    const e = n.start + n.dur; n.soundEnd = e;
+    for(const [ps, pe] of pedals){ if(ps > e) break; if(e > ps + 0.02 && e < pe){ n.soundEnd = pe; break; } }
+  }
   notes.sort((a,b) => a.start - b.start || a.midi - b.midi);
   const end = Math.max(...notes.map(n => n.start + n.dur));
   const mids = notes.map(n => n.midi).sort((a,b)=>a-b);
-  return {title, notes, bars, barNums:barNums || null, bpm:Math.round(bpm), end, lo:mids[0], hi:mids[mids.length-1], median:mids[mids.length>>1]};
+  return {title, notes, bars, pedals, barNums:barNums || null, bpm:Math.round(bpm), end, lo:mids[0], hi:mids[mids.length-1], median:mids[mids.length>>1]};
 }
 
 /* ---------------- Sound ---------------- */
@@ -806,8 +830,8 @@ function updateSongInfo(){
 /* ---------------- My songs & progress (this browser only) ---------------- */
 const r3 = x => Math.round(x * 1000) / 1000;
 function songId(song){ let h = 0; for(const n of song.notes.slice(0, 400)) h = (h * 31 + n.midi * 7 + Math.round(n.start * 100)) | 0; return 's:' + song.title + '|' + song.notes.length + '|' + (h >>> 0).toString(36); }
-function packSong(s){ return {title:s.title, bpm:s.bpm, bars:s.bars.map(r3), barNums:s.barNums, n:s.notes.map(n => [n.midi, r3(n.start), r3(n.dur), n.hand === 'L' ? 1 : 0, n.finger || 0])}; }
-function unpackSong(p){ return finalize(p.title, p.n.map(a => ({midi:a[0], start:a[1], dur:a[2], hand:a[3] ? 'L' : 'R', finger:a[4] || 0})), p.bars, p.bpm, p.barNums); }
+function packSong(s){ return {title:s.title, bpm:s.bpm, bars:s.bars.map(r3), barNums:s.barNums, pd:(s.pedals || []).map(p => [r3(p[0]), r3(p[1])]), n:s.notes.map(n => [n.midi, r3(n.start), r3(n.dur), n.hand === 'L' ? 1 : 0, n.finger || 0])}; }
+function unpackSong(p){ return finalize(p.title, p.n.map(a => ({midi:a[0], start:a[1], dur:a[2], hand:a[3] ? 'L' : 'R', finger:a[4] || 0})), p.bars, p.bpm, p.barNums, p.pd); }
 // Kept in this browser first, and mirrored to the viewer's private online store (cloud, below) when available.
 // Removed songs/scores stay as small "deleted" markers, so another device does not bring them back.
 const progress = {
@@ -1010,6 +1034,7 @@ const COL = { R:C('right'), L:C('left'), good:C('good'), wrong:C('wrong'), ivory
 const NAMES = { letters:['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'], solfege:['do','do#','re','re#','mi','fa','fa#','sol','sol#','la','la#','si'] };
 const noteName = m => S.names === 'off' ? '' : NAMES[S.names][m % 12];
 
+let pill = null; // the on-screen pedal button, set while drawing
 function rr(x, y, w, h, r){
   r = Math.min(r, w/2, h/2);
   ctx.beginPath(); ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r); ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
@@ -1092,6 +1117,32 @@ function draw(now){
       }
       if(n.start <= t && t < n.start + n.dur) lit.set(n.midi, col);
     }
+  }
+
+  // sustain pedal: lane in the right margin (filled while the pedal is down, a tick where you press it)
+  let pedalNow = sustain.on;
+  if(S.song && S.song.pedals && S.song.pedals.length){
+    const lw = Math.max(4, Math.min(7, pad - 3)), lx = W - pad + (pad - lw) / 2;
+    for(const [ps, pe] of S.song.pedals){
+      if(ps <= t && t < pe) pedalNow = true;
+      const yTop = yOf(pe), yBot = yOf(ps);
+      if(yBot < 0 || yTop > fallH) continue;
+      const top = Math.max(0, yTop + 1), bot = Math.min(fallH, yBot);
+      ctx.fillStyle = alpha(COL.R, 0.35); ctx.fillRect(lx, top, lw, Math.max(1, bot - top));
+      if(yBot >= 0 && yBot <= fallH){ ctx.fillStyle = COL.R; ctx.fillRect(lx - 2, yBot - 2, lw + 4, 3); }
+    }
+  }
+  pill = null;
+  if((S.song && S.song.pedals && S.song.pedals.length) || TOUCH || sustain.on){
+    ctx.font = `700 12px ${F_BODY}`;
+    const pw = Math.ceil(ctx.measureText('Pedaal').width) + 22, ph = 22;
+    pill = {x:W - pad - pw - 6, y:fallH - ph - 10, w:pw, h:ph};
+    rr(pill.x, pill.y, pw, ph, ph / 2);
+    ctx.fillStyle = pedalNow ? COL.R : 'rgba(23,28,40,0.85)'; ctx.fill();
+    ctx.strokeStyle = pedalNow ? COL.R : alpha(COL.ivory, 0.3); ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = pedalNow ? '#1b1205' : alpha(COL.ivory, 0.75); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Pedaal', pill.x + pw / 2, pill.y + ph / 2 + 0.5);
+    ctx.textBaseline = 'alphabetic';
   }
 
   // hit line
@@ -1191,8 +1242,9 @@ function frame(now){
     while(ni < notes.length && notes[ni].start < nt){
       const n = notes[ni++];
       if(n.start >= S.t - 0.001 && !isUser(n)){
-        const v = audio.play(n.midi, Math.max(0.12, n.dur / S.speed), 0.65);
-        autoVoices.add(v); setTimeout(() => autoVoices.delete(v), (n.dur / S.speed) * 1000 + 800);
+        const len = (n.soundEnd || n.start + n.dur) - n.start;
+        const v = audio.play(n.midi, Math.max(0.12, len / S.speed), 0.65);
+        autoVoices.add(v); setTimeout(() => autoVoices.delete(v), (len / S.speed) * 1000 + 800);
       }
     }
     S.t = nt;
@@ -1231,7 +1283,7 @@ function frame(now){
 let looping = false;
 const extraBusy = () => mic.on;   // keep listening while the microphone is on
 function isBusy(now){
-  if(S.playing || extraBusy() || held.size || pointers.size || fx.on) return true;
+  if(S.playing || extraBusy() || held.size || pointers.size || fx.on || sustain.on) return true;
   for(const f of flashes.values()) if(f.until > now) return true;
   return false;
 }
@@ -1259,9 +1311,19 @@ function userDown(midi, vel = 0.8){
   held.set(midi, {voice:audio.play(midi, null, vel), color});
   updateScore();
 }
+const sustain = {
+  on:false, voices:[],
+  set(on){
+    if(on === this.on) return;
+    this.on = on;
+    if(!on){ this.voices.forEach(v => v.stop()); this.voices = []; }
+    kick();
+  }
+};
 function userUp(midi){
   const h = held.get(midi); if(!h) return;
-  h.voice.stop(); held.delete(midi);
+  held.delete(midi);
+  if(sustain.on) sustain.voices.push(h.voice); else h.voice.stop();
   flashes.set(midi, {color:h.color, until:performance.now() + 90});
 }
 
@@ -1288,6 +1350,7 @@ function kbLabel(m){
 const keyHeld = new Map();
 window.addEventListener('keydown', e => {
   if(e.target.closest('textarea,input[type=text]') || !$('lib').hidden) { if(e.key === 'Escape') closeLib(); return; }
+  if(e.key === 'Shift'){ sustain.set(true); return; }
   if(e.code === 'Space'){ e.preventDefault(); togglePlay(); return; }
   if(e.code === 'ArrowLeft'){ e.preventDefault(); if(S.song) seek(Math.max(-1.5, S.t - 3)); return; }
   if(e.code === 'ArrowRight'){ e.preventDefault(); if(S.song) seek(Math.min(S.song.end, S.t + 3)); return; }
@@ -1296,7 +1359,7 @@ window.addEventListener('keydown', e => {
   const m = codeToMidi(e.code); if(m == null) return;
   e.preventDefault(); keyHeld.set(e.code, m); userDown(m);
 });
-window.addEventListener('keyup', e => { const m = keyHeld.get(e.code); if(m != null){ keyHeld.delete(e.code); userUp(m); } });
+window.addEventListener('keyup', e => { if(e.key === 'Shift') sustain.set(false); const m = keyHeld.get(e.code); if(m != null){ keyHeld.delete(e.code); userUp(m); } });
 window.addEventListener('blur', () => { keyHeld.forEach(m => userUp(m)); keyHeld.clear(); });
 
 // mouse / touch on the drawn keyboard
@@ -1308,8 +1371,12 @@ function keyAt(px, py){
   return null;
 }
 const pointers = new Map();
+let pedalPtr = null;
+const inPill = (x, y) => pill && x >= pill.x - 6 && x <= pill.x + pill.w + 6 && y >= pill.y - 6 && y <= pill.y + pill.h + 6;
 cv.addEventListener('pointerdown', e => {
-  const r = cv.getBoundingClientRect(); const m = keyAt(e.clientX - r.left, e.clientY - r.top);
+  const r = cv.getBoundingClientRect();
+  if(inPill(e.clientX - r.left, e.clientY - r.top)){ cv.setPointerCapture(e.pointerId); pedalPtr = e.pointerId; sustain.set(true); return; }
+  const m = keyAt(e.clientX - r.left, e.clientY - r.top);
   if(m == null) return;
   cv.setPointerCapture(e.pointerId); pointers.set(e.pointerId, m); userDown(m);
 });
@@ -1319,7 +1386,7 @@ cv.addEventListener('pointermove', e => {
   const old = pointers.get(e.pointerId);
   if(m != null && m !== old){ userUp(old); pointers.set(e.pointerId, m); userDown(m); }
 });
-const endPtr = e => { const m = pointers.get(e.pointerId); if(m != null){ userUp(m); pointers.delete(e.pointerId); } };
+const endPtr = e => { if(e.pointerId === pedalPtr){ pedalPtr = null; sustain.set(false); return; } const m = pointers.get(e.pointerId); if(m != null){ userUp(m); pointers.delete(e.pointerId); } };
 cv.addEventListener('pointerup', endPtr); cv.addEventListener('pointercancel', endPtr);
 
 // real MIDI keyboard (only where the browser allows it)
@@ -1329,7 +1396,8 @@ try{
       let any = false;
       acc.inputs.forEach(inp => { any = true; inp.onmidimessage = ev => {
         const [st, a, v] = ev.data, hi = st & 0xF0;
-        if(hi === 0x90 && v > 0) userDown(a, 0.4 + v / 200); else if(hi === 0x80 || hi === 0x90) userUp(a);
+        if(hi === 0xB0 && a === 64) sustain.set(v >= 64);
+        else if(hi === 0x90 && v > 0) userDown(a, 0.4 + v / 200); else if(hi === 0x80 || hi === 0x90) userUp(a);
       }; });
       $('midiChip').hidden = !any;
     };
