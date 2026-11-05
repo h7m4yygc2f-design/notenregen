@@ -334,7 +334,7 @@ button,.btn,input{touch-action:manipulation;-webkit-tap-highlight-color:transpar
         <p class="err" id="txtErr" hidden></p>
       </div>
     </section>
-    <p style="margin:0;color:var(--muted);font-size:12px">Pianogeluid: Salamander Grand Piano V3, opgenomen door Alexander Holm (CC BY 3.0). · <strong>Versie 14</strong> (met pedaal)</p>
+    <p style="margin:0;color:var(--muted);font-size:12px">Pianogeluid: Salamander Grand Piano V3, opgenomen door Alexander Holm (CC BY 3.0). · <strong>Versie 15</strong> (met pedaal)</p>
   </div>
 </div>
 
@@ -1163,14 +1163,14 @@ function draw(now){
   // sustain pedal: lane in the right margin (filled while the pedal is down, a tick where you press it)
   let pedalNow = sustain.on;
   if(S.song && S.song.pedals && S.song.pedals.length){
-    const lw = Math.max(4, Math.min(7, pad - 3)), lx = W - pad + (pad - lw) / 2;
+    const lw = Math.max(5, Math.min(10, pad - 4)), lx = W - pad + (pad - lw) / 2;
     for(const [ps, pe] of S.song.pedals){
       if(ps <= t && t < pe) pedalNow = true;
       const yTop = yOf(pe), yBot = yOf(ps);
       if(yBot < 0 || yTop > fallH) continue;
       const top = Math.max(0, yTop + 1), bot = Math.min(fallH, yBot);
-      ctx.fillStyle = alpha(COL.R, 0.35); ctx.fillRect(lx, top, lw, Math.max(1, bot - top));
-      if(yBot >= 0 && yBot <= fallH){ ctx.fillStyle = COL.R; ctx.fillRect(lx - 2, yBot - 2, lw + 4, 3); }
+      ctx.fillStyle = alpha(COL.R, 0.6); ctx.fillRect(lx, top, lw, Math.max(1, bot - top));
+      if(yBot >= 0 && yBot <= fallH){ ctx.fillStyle = COL.R; ctx.fillRect(lx - 3, yBot - 3, lw + 6, 5); }
     }
   }
   pill = null;
